@@ -22,7 +22,7 @@ int main(){
     }
   );
 
-	if (client.connect("localhost", 1883)) {
+	if(auto ok = client.connect("localhost", 1883); ok) {
 
     // subscribe to some test topics
 		client.subscribe("kxx_mqtt_test/qos0", kxx::mqtt::QOS_0);
@@ -39,6 +39,8 @@ int main(){
 
 			std::this_thread::sleep_for(std::chrono::milliseconds(500));
 		}
-	}
+	}else{
+    std::println("Could not connect: {}", ok.error());
+  }
 
 }

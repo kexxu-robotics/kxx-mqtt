@@ -1,33 +1,6 @@
 #pragma once
 
-// Configurazione per Windows
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-#include <mstcpip.h>
-#pragma comment(lib, "ws2_32.lib")
-
-typedef SOCKET socket_t;
-typedef int socklen_t;
-#define INVALID_SOCKET_VALUE INVALID_SOCKET
-#define SOCKET_ERROR_VALUE SOCKET_ERROR
-#define CLOSE_SOCKET closesocket
-#define LAST_ERROR WSAGetLastError()
-
-#ifndef SIO_KEEPALIVE_VALS
-#define SIO_KEEPALIVE_VALS _WSAIOW(IOC_VENDOR, 4)
-#endif
-#else
-// Linux/Unix
+// Linux/Unix only
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -44,7 +17,6 @@ typedef int socket_t;
 #define SOCKET_ERROR_VALUE -1
 #define CLOSE_SOCKET close
 #define LAST_ERROR errno
-#endif
 
 #include <cstring>
 #include <string>
@@ -54,56 +26,13 @@ typedef int socket_t;
 #include <chrono>
 #include <mutex>
 #include <atomic>
+#include <expected>
 
 namespace kxx::mqtt {
 
     // Forward declarations
     class TLSSocket;
     struct TLSConfig;
-
-    // Socket system initialization
-    class SocketSystem {
-    private:
-        static std::atomic<bool> initialized_;
-        static std::mutex init_mutex_;
-
-    public:
-        static bool initialize() {
-            std::lock_guard<std::mutex> lock(init_mutex_);
-
-#ifdef _WIN32
-            if (!initialized_.load()) {
-                WSADATA wsaData;
-                int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-                if (result == 0) {
-                    initialized_ = true;
-                }
-                return result == 0;
-            }
-            return true;
-#else
-            initialized_ = true;
-            return true;
-#endif
-        }
-
-        static void cleanup() {
-            std::lock_guard<std::mutex> lock(init_mutex_);
-
-#ifdef _WIN32
-            if (initialized_.load()) {
-                WSACleanup();
-                initialized_ = false;
-            }
-#else
-            initialized_ = false;
-#endif
-        }
-
-        static bool is_initialized() {
-            return initialized_.load();
-        }
-    };
 
     // Main Socket class
     class Socket {
@@ -115,11 +44,7 @@ namespace kxx::mqtt {
         // Internal close without lock
         void close_internal() {
             if (fd_ != INVALID_SOCKET_VALUE) {
-#ifdef _WIN32
-                ::shutdown(fd_, SD_BOTH);
-#else
                 ::shutdown(fd_, SHUT_RDWR);
-#endif
                 ::close(fd_);
                 fd_ = INVALID_SOCKET_VALUE;
                 is_connected_ = false;
@@ -129,23 +54,13 @@ namespace kxx::mqtt {
     public:
 
         static int get_last_error() {
-#ifdef _WIN32
-            return WSAGetLastError();
-#else
             return errno;
-#endif
         }
 
         Socket() : fd_(INVALID_SOCKET_VALUE), is_connected_(false) {
-            if (!SocketSystem::is_initialized()) {
-                SocketSystem::initialize();
-            }
         }
 
         explicit Socket(socket_t fd) : fd_(fd), is_connected_(true) {
-            if (!SocketSystem::is_initialized()) {
-                SocketSystem::initialize();
-            }
         }
 
         virtual ~Socket() {
@@ -208,10 +123,6 @@ namespace kxx::mqtt {
 
             if (fd_ == INVALID_SOCKET_VALUE) return false;
 
-#ifdef _WIN32
-            u_long mode = enable ? 1 : 0;
-            return ioctlsocket(fd_, FIONBIO, &mode) == 0;
-#else
             int flags = fcntl(fd_, F_GETFL, 0);
             if (flags == -1) return false;
 
@@ -223,7 +134,6 @@ namespace kxx::mqtt {
             }
 
             return fcntl(fd_, F_SETFL, flags) != -1;
-#endif
         }
 
         // Set reuse address
@@ -233,13 +143,8 @@ namespace kxx::mqtt {
             if (fd_ == INVALID_SOCKET_VALUE) return false;
 
             int flag = enable ? 1 : 0;
-#ifdef _WIN32
-            return setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR,
-                (const char*)&flag, sizeof(flag)) == 0;
-#else
             return setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR,
                 &flag, sizeof(flag)) == 0;
-#endif
         }
 
         // Set TCP nodelay
@@ -249,13 +154,8 @@ namespace kxx::mqtt {
             if (fd_ == INVALID_SOCKET_VALUE) return false;
 
             int flag = enable ? 1 : 0;
-#ifdef _WIN32
-            return setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY,
-                (const char*)&flag, sizeof(flag)) == 0;
-#else
             return setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY,
                 &flag, sizeof(flag)) == 0;
-#endif
         }
 
         bool set_nodelay(bool enable) {
@@ -268,13 +168,8 @@ namespace kxx::mqtt {
 
             if (fd_ == INVALID_SOCKET_VALUE) return false;
 
-#ifdef _WIN32
-            return setsockopt(fd_, SOL_SOCKET, SO_SNDBUF,
-                (const char*)&size, sizeof(size)) == 0;
-#else
             return setsockopt(fd_, SOL_SOCKET, SO_SNDBUF,
                 &size, sizeof(size)) == 0;
-#endif
         }
 
         bool set_receive_buffer_size(int size) {
@@ -282,13 +177,8 @@ namespace kxx::mqtt {
 
             if (fd_ == INVALID_SOCKET_VALUE) return false;
 
-#ifdef _WIN32
-            return setsockopt(fd_, SOL_SOCKET, SO_RCVBUF,
-                (const char*)&size, sizeof(size)) == 0;
-#else
             return setsockopt(fd_, SOL_SOCKET, SO_RCVBUF,
                 &size, sizeof(size)) == 0;
-#endif
         }
 
         // Set timeouts
@@ -297,17 +187,11 @@ namespace kxx::mqtt {
 
             if (fd_ == INVALID_SOCKET_VALUE) return false;
 
-#ifdef _WIN32
-            DWORD timeout = timeout_ms;
-            return setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO,
-                (const char*)&timeout, sizeof(timeout)) == 0;
-#else
             struct timeval tv;
             tv.tv_sec = timeout_ms / 1000;
             tv.tv_usec = (timeout_ms % 1000) * 1000;
             return setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO,
                 &tv, sizeof(tv)) == 0;
-#endif
         }
 
         bool set_send_timeout(int timeout_ms) {
@@ -315,17 +199,11 @@ namespace kxx::mqtt {
 
             if (fd_ == INVALID_SOCKET_VALUE) return false;
 
-#ifdef _WIN32
-            DWORD timeout = timeout_ms;
-            return setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO,
-                (const char*)&timeout, sizeof(timeout)) == 0;
-#else
             struct timeval tv;
             tv.tv_sec = timeout_ms / 1000;
             tv.tv_usec = (timeout_ms % 1000) * 1000;
             return setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO,
                 &tv, sizeof(tv)) == 0;
-#endif
         }
 
         // Server operations
@@ -342,15 +220,9 @@ namespace kxx::mqtt {
                 addr.sin_addr.s_addr = INADDR_ANY;
             }
             else {
-#ifdef _WIN32
-                if (InetPtonA(AF_INET, address.c_str(), &addr.sin_addr) != 1) {
-                    return false;
-                }
-#else
                 if (inet_pton(AF_INET, address.c_str(), &addr.sin_addr) <= 0) {
                     return false;
                 }
-#endif
             }
 
             return ::bind(fd_, (sockaddr*)&addr, sizeof(addr)) == 0;
@@ -381,105 +253,62 @@ namespace kxx::mqtt {
             return Socket();
         }
 
-        // Client operations
-        bool connect(const std::string& host, uint16_t port) {
+        std::expected<void, std::string> connect(const std::string& host, uint16_t port) {
             std::lock_guard<std::mutex> lock(socket_mutex_);
 
-            if (fd_ == INVALID_SOCKET_VALUE) return false;
+            const std::string service = std::to_string(port);
 
-            sockaddr_in addr{};
-            addr.sin_family = AF_INET;
-            addr.sin_port = htons(port);
+            addrinfo hints{};
+            hints.ai_family   = AF_UNSPEC;
+            hints.ai_socktype = SOCK_STREAM;
+            hints.ai_protocol = IPPROTO_TCP;
 
-            // Try to parse as IP address first
-#ifdef _WIN32
-            if (InetPtonA(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-                // Not an IP address, try DNS resolution
-                struct addrinfo hints {}, * result = nullptr;
-                hints.ai_family = AF_INET;
-                hints.ai_socktype = SOCK_STREAM;
-
-                std::string port_str = std::to_string(port);
-                if (getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result) == 0) {
-                    sockaddr_in* addr_in = (sockaddr_in*)result->ai_addr;
-                    addr = *addr_in;
-                    freeaddrinfo(result);
-                }
-                else {
-                    return false;
-                }
+            addrinfo* res = nullptr;
+            const int gai_rc = ::getaddrinfo(host.c_str(), service.c_str(), &hints, &res);
+            if (gai_rc != 0){
+              std::string msg = ::gai_strerror(gai_rc);
+              return std::unexpected(msg);
             }
-#else
-            if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0) {
-                // Not an IP address, try DNS resolution
-                struct hostent* he = gethostbyname(host.c_str());
-                if (he == nullptr) {
-                    return false;
-                }
-                addr.sin_addr = *((struct in_addr*)he->h_addr);
-            }
-#endif
 
-            int result = ::connect(fd_, (sockaddr*)&addr, sizeof(addr));
+            struct ResGuard { addrinfo* p{}; ~ResGuard(){ if(p) ::freeaddrinfo(p);} } guard{res};
 
-#ifdef _WIN32
-            if (result == SOCKET_ERROR) {
-                int error = WSAGetLastError();
-                if (error == WSAEWOULDBLOCK || error == WSAEINPROGRESS) {
+            // Close any existing socket first (optional; depends on your semantics)
+            close_internal();
+
+            for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+                socket_t s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+                if (s == INVALID_SOCKET_VALUE) continue;
+
+                // If your class supports non-blocking by option, apply it here.
+                // Example:
+                // int flags = fcntl(s, F_GETFL, 0);
+                // fcntl(s, F_SETFL, flags | O_NONBLOCK);
+
+                const int rc = ::connect(s, ai->ai_addr, static_cast<socklen_t>(ai->ai_addrlen));
+                if (rc == 0) {
+                    fd_ = s;
                     is_connected_ = true;
-                    return true;
+                    return {};
                 }
-                return false;
-            }
-#else
-            if (result < 0) {
-                if (errno == EINPROGRESS || errno == EWOULDBLOCK) {
-                    is_connected_ = true;
-                    return true;
-                }
-                return false;
-            }
-#endif
 
-            is_connected_ = true;
-            return true;
+                const int e = errno;
+                if (e == EINPROGRESS || e == EWOULDBLOCK || e == EAGAIN) {
+                    fd_ = s;
+                    is_connected_ = false; // connecting
+                    return std::unexpected("Connecting in progress");
+                }
+
+                ::close(s);
+            }
+
+            return std::unexpected("Could not connect");;
         }
+
 
         bool wait_for_connect(int timeout_ms) {
             std::lock_guard<std::mutex> lock(socket_mutex_);
 
             if (fd_ == INVALID_SOCKET_VALUE) return false;
-
-#ifdef _WIN32
-            fd_set write_set, error_set;
-            FD_ZERO(&write_set);
-            FD_ZERO(&error_set);
-            FD_SET(fd_, &write_set);
-            FD_SET(fd_, &error_set);
-
-            struct timeval tv;
-            tv.tv_sec = timeout_ms / 1000;
-            tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-            int result = select(static_cast<int>(fd_) + 1, nullptr, &write_set, &error_set, &tv);
-
-            if (result > 0) {
-                if (FD_ISSET(fd_, &error_set)) {
-                    return false;
-                }
-                if (FD_ISSET(fd_, &write_set)) {
-                    int error = 0;
-                    socklen_t len = sizeof(error);
-                    if (getsockopt(fd_, SOL_SOCKET, SO_ERROR,
-                        (char*)&error, &len) == 0) {
-                        if (error == 0) {
-                            is_connected_ = true;
-                            return true;
-                        }
-                    }
-                }
-            }
-#else
             struct pollfd pfd;
             pfd.fd = fd_;
             pfd.events = POLLOUT;
@@ -496,7 +325,6 @@ namespace kxx::mqtt {
                     }
                 }
             }
-#endif
             return false;
         }
 
@@ -510,11 +338,7 @@ namespace kxx::mqtt {
 
             if (fd_ == INVALID_SOCKET_VALUE || !data || len == 0) return -1;
 
-#ifdef _WIN32
-            return ::send(fd_, (const char*)data, static_cast<int>(len), 0);
-#else
             return ::send(fd_, data, len, MSG_NOSIGNAL);
-#endif
         }
 
         int send(const std::string& data) {
@@ -534,11 +358,7 @@ namespace kxx::mqtt {
 
             if (fd_ == INVALID_SOCKET_VALUE || !buffer || max_len == 0) return -1;
 
-#ifdef _WIN32
-            return ::recv(fd_, (char*)buffer, static_cast<int>(max_len), 0);
-#else
             return ::recv(fd_, buffer, max_len, 0);
-#endif
         }
 
         int receive(char* buffer, size_t max_len) {
@@ -570,12 +390,7 @@ namespace kxx::mqtt {
         }
 
         bool would_block() const {
-#ifdef _WIN32
-            int error = WSAGetLastError();
-            return (error == WSAEWOULDBLOCK || error == WSAEINPROGRESS);
-#else
             return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS);
-#endif
         }
 
         // Get peer address
@@ -589,11 +404,7 @@ namespace kxx::mqtt {
 
             if (getpeername(fd_, (sockaddr*)&addr, &len) == 0) {
                 char ip_str[INET_ADDRSTRLEN];
-#ifdef _WIN32
-                InetNtopA(AF_INET, &addr.sin_addr, ip_str, INET_ADDRSTRLEN);
-#else
                 inet_ntop(AF_INET, &addr.sin_addr, ip_str, INET_ADDRSTRLEN);
-#endif
                 return std::string(ip_str) + ":" + std::to_string(ntohs(addr.sin_port));
             }
 
@@ -602,45 +413,20 @@ namespace kxx::mqtt {
 
         // Error handling
 
-
         bool set_reuse_port(bool enable) {
-          // TODO does not work sock_ undefined
-          return true;
-#ifdef SO_REUSEPORT
-           // int opt = enable ? 1 : 0;
-           // return setsockopt(sock_, SOL_SOCKET, SO_REUSEPORT,
-           //     reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
-#else
-            //return true;  // Not supported on Windows
-#endif
+           int opt = enable ? 1 : 0;
+           return setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT,
+               reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
         }
 
         static std::string get_last_error_string() {
-#ifdef _WIN32
-            int error = WSAGetLastError();
-            char buffer[256];
-            FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                nullptr, error,
-                MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                buffer, sizeof(buffer), nullptr);
-            return std::string(buffer);
-#else
             return std::string(strerror(errno));
-#endif
         }
 
         static int get_last_error_code() {
-#ifdef _WIN32
-            return WSAGetLastError();
-#else
             return errno;
-#endif
         }
     };
-
-    // Static member initialization
-    inline std::atomic<bool> SocketSystem::initialized_{ false };
-    inline std::mutex SocketSystem::init_mutex_;
 
 } // namespace kxx::mqtt
 

@@ -1,16 +1,5 @@
 #pragma once
 
-// Configurazione per Windows
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#endif
-
-
 #include <kxx/mqtt/socket.hpp>
 #include <kxx/mqtt/tls_socket.hpp>
 #include <kxx/mqtt/buffer.hpp>
@@ -18,6 +7,7 @@
 #include <kxx/mqtt/thread_utils.hpp>
 #include <kxx/mqtt/time_utils.hpp>
 #include <kxx/mqtt/logger.hpp>
+#include <kxx/mqtt/format.hpp>
 
 
 #include <functional>
@@ -38,6 +28,8 @@
 #include <sstream>      // AGGIUNTO per std::stringstream
 #include <thread>       // Per std::thread
 #include <set>
+#include <expected>
+#include <format>
 
 namespace kxx::mqtt {
 
@@ -487,12 +479,6 @@ namespace kxx::mqtt {
             send_buffer_(config.send_buffer_size),
             current_reconnect_delay_ms_(config.initial_reconnect_delay_ms) {
 
-            if (!SocketSystem::is_initialized()) {
-                if (!SocketSystem::initialize()) {
-                    throw std::runtime_error("Failed to initialize socket system");
-                }
-            }
-
             // Generate client ID if empty
             if (config_.client_id.empty()) {
                 config_.client_id = generate_client_id();
@@ -504,29 +490,32 @@ namespace kxx::mqtt {
         }
 
         // Connection methods
-        std::future<bool> connect_async(const std::string& host, uint16_t port) {
-            auto promise = std::make_shared<std::promise<bool>>();
+        std::future<std::expected<void, std::string>> connect_async(const std::string& host, uint16_t port) {
+            auto promise = std::make_shared<std::promise<std::expected<void, std::string>>>();
             auto future = promise->get_future();
 
             std::thread([this, host, port, promise]() {
-                bool result = connect(host, port);
+                auto result = connect(host, port);
                 promise->set_value(result);
                 }).detach();
 
                 return future;
         }
 
-        bool connect(const std::string& host, uint16_t port, int timeout_ms = 30000) {
+        std::expected<void, std::string> connect(
+            const std::string& host, 
+            uint16_t port, 
+            int timeout_ms = 30000) 
+        {
             if (state_machine_->get_state() != ConnectionState::DISCONNECTED) {
-                LOG_WARN("CLIENT") << "Already connected or connecting";
-                return false;
+              return std::unexpected("Already connected or connecting");
             }
 
             host_ = host;
             port_ = port;
 
             if (!state_machine_->transition_to(ConnectionState::CONNECTING)) {
-                return false;
+              return std::unexpected("Already busy connecting");
             }
 
             metrics_->record_connection_attempt();
@@ -537,26 +526,26 @@ namespace kxx::mqtt {
 
             try {
                 // Create socket
-                if (!create_and_connect_socket()) {
+                if (auto ok = create_and_connect_socket(); !ok) {
                     state_machine_->transition_to(ConnectionState::CONNECTION_ERROR);
                     metrics_->record_connection_failure();
-                    return false;
+                    return ok; // unexpected
                 }
 
                 // Send CONNECT packet
-                if (!send_connect_packet()) {
+                if (auto ok = send_connect_packet(); !ok) {
                     disconnect_internal();
                     state_machine_->transition_to(ConnectionState::CONNECTION_ERROR);
                     metrics_->record_connection_failure();
-                    return false;
+                    return ok; // unexpected
                 }
 
                 // Wait for CONNACK
-                if (!wait_for_connack(timeout_ms)) {
+                if (auto ok = wait_for_connack(timeout_ms); !ok) {
                     disconnect_internal();
                     state_machine_->transition_to(ConnectionState::CONNECTION_ERROR);
                     metrics_->record_connection_failure();
-                    return false;
+                    return ok; // unexpected
                 }
 
                 state_machine_->transition_to(ConnectionState::CONNECTED);
@@ -578,15 +567,14 @@ namespace kxx::mqtt {
 
                 LOG_INFO("CLIENT") << "Connected successfully";
 
-                return true;
+                return {};
 
             }
             catch (const std::exception& e) {
-                LOG_ERROR("CLIENT") << "Connection error: " << e.what();
                 disconnect_internal();
                 state_machine_->transition_to(ConnectionState::CONNECTION_ERROR);
                 metrics_->record_connection_failure();
-                return false;
+                return std::unexpected(std::format("Connection error: {}", e.what()));
             }
         }
 
@@ -838,7 +826,7 @@ namespace kxx::mqtt {
 
     private:
         // Socket management
-        bool create_and_connect_socket() {
+        std::expected<void, std::string> create_and_connect_socket() {
             // Create appropriate socket type
             if (config_.use_tls) {
                 socket_ = std::make_unique<TLSSocket>();
@@ -848,8 +836,7 @@ namespace kxx::mqtt {
             }
 
             if (!socket_->create()) {
-                LOG_ERROR("CLIENT") << "Failed to create socket";
-                return false;
+                return std::unexpected("Failed to create socket");
             }
 
             // Configure socket options BEFORE connect (but NOT non-blocking yet!)
@@ -864,10 +851,8 @@ namespace kxx::mqtt {
             // IMPORTANT: Connect in BLOCKING mode first
             LOG_DEBUG("CLIENT") << "Connecting to " << host_ << ":" << port_ << "...";
 
-            if (!socket_->connect(host_, port_)) {
-                LOG_ERROR("CLIENT") << "Failed to connect to " << host_ << ":" << port_
-                    << " - Error: " << Socket::get_last_error_string();
-                return false;
+            if (auto ok = socket_->connect(host_, port_); !ok) {
+              return ok; // unexpected
             }
 
             LOG_DEBUG("CLIENT") << "TCP connection established";
@@ -880,13 +865,11 @@ namespace kxx::mqtt {
                 auto tls_socket = dynamic_cast<TLSSocket*>(socket_.get());
                 if (tls_socket) {
                     if (!tls_socket->enable_tls(config_.tls_config, false)) {
-                        LOG_ERROR("CLIENT") << "Failed to enable TLS";
-                        return false;
+                        return std::unexpected("Failed to enable TLS");
                     }
 
                     if (!tls_socket->perform_handshake(false)) {
-                        LOG_ERROR("CLIENT") << "TLS handshake failed";
-                        return false;
+                        return std::unexpected("TLS handshake failed");
                     }
 
                     LOG_INFO("CLIENT") << "TLS connection established";
@@ -898,12 +881,11 @@ namespace kxx::mqtt {
             // WebSocket upgrade if needed
             if (config_.use_websocket) {
                 if (!perform_websocket_handshake()) {
-                    LOG_ERROR("CLIENT") << "WebSocket handshake failed";
-                    return false;
+                    return std::unexpected("WebSocket handshake failed");
                 }
             }
 
-            return true;
+            return {};
         }
 
         bool perform_websocket_handshake() {
@@ -994,7 +976,7 @@ namespace kxx::mqtt {
         }
 
         // Packet handling
-        bool send_connect_packet() {
+        std::expected<void, std::string> send_connect_packet() {
             LOG_DEBUG("CLIENT") << "Preparing CONNECT packet...";
 
             ConnectPacket connect_pkt;
@@ -1026,16 +1008,16 @@ namespace kxx::mqtt {
             bool result = send_packet(buffer);
 
             if (result) {
-                LOG_DEBUG("CLIENT") << "CONNECT packet sent successfully";
+              LOG_DEBUG("CLIENT") << "CONNECT packet sent successfully";
             }
             else {
-                LOG_ERROR("CLIENT") << "Failed to send CONNECT packet";
+              return std::unexpected("Failed to send CONNECT packet");
             }
 
-            return result;
+            return {};
         }
 
-        bool wait_for_connack(int timeout_ms) {
+        std::expected<void, std::string> wait_for_connack(int timeout_ms) {
             uint8_t buffer[256];
             size_t received = 0;
             Timer timeout;
@@ -1054,17 +1036,19 @@ namespace kxx::mqtt {
                         // Check packet type
                         uint8_t packet_type = (buffer[0] >> 4);
                         if (packet_type != CONNACK) {
-                            LOG_ERROR("CLIENT") << "Expected CONNACK (0x02), got 0x"
-                                << std::hex << static_cast<int>(packet_type);
-                            return false;
+                            //LOG_ERROR("CLIENT") << "Expected CONNACK (0x02), got 0x"
+                            //    << std::hex << static_cast<int>(packet_type);
+                            return std::unexpected(std::format(
+                                  "Expected CONNACK, got {}", static_cast<PacketType>(packet_type)
+                                ));
                         }
 
                         // Parse CONNACK
                         uint8_t remaining_length = buffer[1];
                         if (remaining_length != 2) {
-                            LOG_ERROR("CLIENT") << "Invalid CONNACK remaining length: "
-                                << static_cast<int>(remaining_length);
-                            return false;
+                            return std::unexpected(std::format(
+                                  "Invalid CONNACK reamining length:  {}", static_cast<int>(remaining_length)
+                                ));
                         }
 
                         uint8_t flags = buffer[2];
@@ -1073,8 +1057,8 @@ namespace kxx::mqtt {
                         bool session_present = (flags & 0x01) != 0;
 
                         if (return_code != 0) {
-                            handle_connack_error(return_code);
-                            return false;
+                            auto msg = handle_connack_error(return_code);
+                            return std::unexpected(msg);
                         }
 
                         LOG_INFO("CLIENT") << "CONNACK received successfully"
@@ -1085,45 +1069,44 @@ namespace kxx::mqtt {
                             fire_event(ClientEvent::SESSION_RESUMED, "Session resumed");
                         }
 
-                        return true;
+                        return {};
                     }
                 }
                 else if (r == 0) {
                     // Connection closed by peer
-                    LOG_ERROR("CLIENT") << "Connection closed while waiting for CONNACK";
-                    return false;
+                    return std::unexpected("Connection closed while waiting for CONNACK");
                 }
                 else {
-                    // r < 0 - check if it's just EWOULDBLOCK
-                    if (!socket_->would_block()) {
-                        LOG_ERROR("CLIENT") << "Socket error while waiting for CONNACK: "
-                            << Socket::get_last_error_string();
-                        return false;
-                    }
-                    // If it's EWOULDBLOCK/EAGAIN, just continue waiting
-                    }
+                  // r < 0 - check if it's just EWOULDBLOCK
+                  if (!socket_->would_block()) {
+                      return std::unexpected(std::format(
+                            "Socket error while waiting for CONNACK: {}",
+                            Socket::get_last_error_string()));
+                  }
+                  // If it's EWOULDBLOCK/EAGAIN, just continue waiting
+                }
 
                 // Small delay to avoid busy waiting
                 Time::sleep_ms(10);
-                }
+              }
 
             LOG_ERROR("CLIENT") << "CONNACK timeout after " << timeout_ms << "ms";
-            return false;
-            }
+            return {};
+          }
 
-        void handle_connack_error(uint8_t code) {
-            const char* error_msg = "";
-            switch (code) {
+        std::string handle_connack_error(uint8_t code) {
+          std::string error_msg{""};
+          switch (code) {
             case 1: error_msg = "Unacceptable protocol version"; break;
             case 2: error_msg = "Identifier rejected"; break;
             case 3: error_msg = "Server unavailable"; break;
             case 4: error_msg = "Bad username or password"; break;
             case 5: error_msg = "Not authorized"; break;
             default: error_msg = "Unknown error"; break;
-            }
+          }
 
-            LOG_ERROR("CLIENT") << "Connection refused: " << error_msg;
-            fire_event(ClientEvent::CLIENT_ERROR, std::string("Connection refused: ") + error_msg);
+          fire_event(ClientEvent::CLIENT_ERROR, std::format("Connection refused: {}", error_msg));
+          return error_msg;
         }
 
         void send_disconnect_packet(uint32_t reason_code) {
