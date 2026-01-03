@@ -2,7 +2,6 @@
 #include <print>
 
 #include <kxx/mqtt/client.hpp>
-#include <kxx/mqtt/format.hpp> // for using std::println and std::format on mqtt settings and status codes
 
 int main(){
 
@@ -22,25 +21,25 @@ int main(){
     }
   );
 
-	if(auto ok = client.connect("localhost", 1883); ok) {
-
-    // subscribe to some test topics
-		client.subscribe("kxx_mqtt_test/qos0", kxx::mqtt::QOS_0);
-		client.subscribe("kxx_mqtt_test/qos1", kxx::mqtt::QOS_1);
-		client.subscribe("kxx_mqtt_test/qos2", kxx::mqtt::QOS_2);
-
-
-    // send some test messages
-		for (int i = 0; i < 5; i++) {
-			std::string msg = std::format("Message #{}", i);
-			client.publish("kxx_mqtt_test/qos0", msg, kxx::mqtt::QOS_0);
-			client.publish("kxx_mqtt_test/qos1", msg, kxx::mqtt::QOS_1);
-			client.publish("kxx_mqtt_test/qos2", msg, kxx::mqtt::QOS_2);
-
-			std::this_thread::sleep_for(std::chrono::milliseconds(500));
-		}
-	}else{
+	if(auto ok = client.connect("localhost", 1883); !ok) {
     std::println("Could not connect: {}", ok.error());
+    return 1;
+  }
+
+  // subscribe to some test topics
+  client.subscribe("kxx_mqtt_test/qos0", kxx::mqtt::QOS_0);
+  client.subscribe("kxx_mqtt_test/qos1", kxx::mqtt::QOS_1);
+  client.subscribe("kxx_mqtt_test/qos2", kxx::mqtt::QOS_2);
+
+
+  // send some test messages
+  for (int i = 0; i < 5; i++) {
+    std::string msg = std::format("Message #{}", i);
+    client.publish("kxx_mqtt_test/qos0", msg, kxx::mqtt::QOS_0);
+    client.publish("kxx_mqtt_test/qos1", msg, kxx::mqtt::QOS_1);
+    client.publish("kxx_mqtt_test/qos2", msg, kxx::mqtt::QOS_2);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 
 }
