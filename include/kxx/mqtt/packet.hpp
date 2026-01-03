@@ -24,10 +24,10 @@ namespace kxx::mqtt {
 	};
 	inline std::string_view to_string(ProtocolVersion p) {
 		switch (p) {
-			case MQTT_3_1:   return "MQTT v3.1";
-			case MQTT_3_1_1: return "MQTT v3.1.1";
-			case MQTT_5_0:   return "MQTT v5.0";
-			default: "MQTT version unknown";
+			case ProtocolVersion::MQTT_3_1:   return "MQTT v3.1";
+			case ProtocolVersion::MQTT_3_1_1: return "MQTT v3.1.1";
+			case ProtocolVersion::MQTT_5_0:   return "MQTT v5.0";
+			default:         return "MQTT version unknown";
 		}
 	}
 
@@ -555,6 +555,7 @@ namespace kxx::mqtt {
         void set_version(ProtocolVersion v) { version_ = v; }
 
         // Helper methods
+        // TODO this is alreayd made at the enum
         static std::string type_to_string(PacketType type) {
             switch (type) {
             case CONNECT: return "CONNECT";
@@ -1736,5 +1737,5 @@ namespace kxx::mqtt {
         }
     };
 
-} // namespace ourmqtt
+} // namespace kxx::mqtt
 

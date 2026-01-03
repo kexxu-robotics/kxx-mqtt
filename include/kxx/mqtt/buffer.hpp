@@ -1679,5 +1679,5 @@ namespace kxx::mqtt {
         }
     }
 
-} // namespace ourmqtt
+} // namespace kxx::mqtt
 

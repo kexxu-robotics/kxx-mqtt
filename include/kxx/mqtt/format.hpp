@@ -1,6 +1,6 @@
 #pragma once
 
-#include <kxx/mqtt/mqtt_packet.hpp>
+#include <kxx/mqtt/packet.hpp>
 
 #include <format>
 #include <string_view>
